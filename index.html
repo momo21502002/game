@@ -129,7 +129,7 @@
   <form id="nameForm" class="name-form">
     <label for="playerName">幫你的熊取名字</label>
     <input id="playerName" type="text" maxlength="8" autocomplete="off" spellcheck="false">
-    <button type="submit">開始選關</button>
+    <button type="submit">開始遊戲</button>
   </form>
   <p class="keys">方向鍵或 WASD 移動，空白鍵放炸彈。也可使用畫面按鈕。</p>
 </div></div>
@@ -141,7 +141,7 @@
 <div id="pauseMenu" class="overlay" hidden><div class="card">
   <h1>暫停中</h1>
   <p>休息一下，準備好再繼續。</p>
-  <div class="row"><button id="resume" type="button">繼續遊戲</button><button id="restart" class="ghost" type="button">重新開始</button><button id="pauseLevels" class="ghost" type="button">選擇關卡</button></div>
+  <div class="row"><button id="resume" type="button">繼續遊戲</button><button id="restart" class="ghost" type="button">重新開始</button><button id="pauseLevels" class="ghost" type="button" hidden>選擇關卡</button></div>
 </div></div>
 <div id="result" class="overlay" hidden><div class="card">
   <h1 id="resultTitle"></h1>
@@ -758,6 +758,9 @@ const BEAR_INFO = {
 const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
 const DIR_LIST = Object.values(DIRS);
 const FUSE_SECONDS = 3.5, FLAME_SECONDS = 0.5, BLAST_RANGE = 1, START_LIVES = 3;
+// Bomb fuse gets shorter each level (level 1 → 5), so later levels feel tenser.
+const FUSE_BY_LEVEL = [3.5, 3.0, 2.6, 2.3, 2.0];
+const fuseSeconds = () => FUSE_BY_LEVEL[LEVELS.indexOf(LEVEL)] ?? FUSE_SECONDS;
 const ITEM_DROP_CHANCE = 0.6, MAX_BOMBS = 5, MAX_RANGE = 6, MAX_SPEED_UPS = 3, KICK_SPEED = 7;
 const ITEM_TYPES = {
   bomb: { icon: 0, apply: a => { a.maxBombs = Math.min(MAX_BOMBS, a.maxBombs + 1); } },
@@ -1231,6 +1234,9 @@ function resetRound() {
   G.bits = [];
   G.items = [];
   G.pops = [];
+  // Shuffle which bear starts in which corner every round.
+  const spawnOrder = [1, 2, 3, 4];
+  for (let i = 3; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [spawnOrder[i], spawnOrder[j]] = [spawnOrder[j], spawnOrder[i]]; }
   MAP.forEach((row, r) => [...row].forEach((ch, c) => {
     const x = cellX(c), z = cellZ(r);
     if (ch === 'O') {
@@ -1238,7 +1244,7 @@ function resetRound() {
       dynamic.add(b);
       G.blocks.set(key(c, r), b);
     }
-    const info = BEAR_INFO[ch];
+    const info = BEAR_INFO[spawnOrder[+ch - 1]];
     if (!info) return;
     const group = bear(info, x, z);
     dynamic.add(group);
@@ -1259,6 +1265,7 @@ function resetRound() {
     }
     G.bears.push(a);
   }));
+  G.bears.sort((x, y) => x.info.num - y.info.num);
   renderHud();
 }
 
@@ -1354,7 +1361,7 @@ function placeBomb(a) {
   if (!a.alive || a.frozen > 0 || a.slip > 0 || a.tp || a.sliding || a.chill > 0 || a.active >= a.maxBombs || bombAt(c, r)) return false;
   const { group, spark } = buildBomb(c, r);
   dynamic.add(group);
-  const bomb = { c, r, owner: a, timer: FUSE_SECONDS, group, spark, warns: [], range: a.range, slide: null };
+  const bomb = { c, r, owner: a, timer: fuseSeconds(), group, spark, warns: [], range: a.range, slide: null };
   G.bombs.push(bomb);
   refreshWarnings(bomb);
   a.active++;
@@ -1741,11 +1748,19 @@ function finish(won) {
   const levelIndex = LEVELS.indexOf(LEVEL);
   if (won) markCleared(levelIndex);
   const next = LEVELS[levelIndex + 1];
-  $('nextLevel').hidden = !(won && next && next.ready);
+  const hasNext = !!(won && next && next.ready);
+  // Simple run: a win jumps straight to the next level; a loss sends you back to level 1 with everything locked again.
+  if (!won) { try { localStorage.removeItem(SAVE_KEY); } catch {} }
+  ['nextLevel', 'toLevels', 'change'].forEach(id => { $(id).hidden = true; });
+  $('again').hidden = hasNext;
+  $('again').textContent = '從第一關開始';
   setTimeout(() => {
     $('resultTitle').textContent = won ? '你贏了！' : '差一點！';
-    $('resultText').textContent = won ? (LEVELS[levelIndex + 1]?.ready ? '三隻電腦熊都被打敗了，下一關等你挑戰！' : '三隻電腦熊都被打敗了，下一關還在製作中。') : '你的三條命用完了，再挑戰一次吧。';
+    $('resultText').textContent = hasNext
+      ? `馬上進入第 ${levelIndex + 2} 關：${next.name}！`
+      : won ? '你打敗了所有電腦熊！下一關還在製作中，敬請期待。' : '你的三條命用完了，要從第一關重新開始喔。';
     $('result').hidden = false;
+    if (hasNext) setTimeout(() => { if (!$('result').hidden) { LEVEL = next; startGame(G.chosen); } }, 2200);
   }, 900);
 }
 function showMenu() {
@@ -1787,8 +1802,10 @@ $('nameForm').addEventListener('submit', e => {
   if (typed) G.names[G.chosen] = typed; else delete G.names[G.chosen];
   try { localStorage.setItem(NAMES_KEY, JSON.stringify(G.names)); } catch {}
   $('playerName').blur();
-  resetRound();
-  showLevels();
+  // The chosen bear stays for the whole run: always start from level 1.
+  try { localStorage.removeItem(SAVE_KEY); } catch {}
+  LEVEL = LEVELS[0];
+  startGame(G.chosen);
 });
 selectBear(1);
 function setPaused(on) {
@@ -1820,7 +1837,7 @@ function showLevels() {
     const image = l.background
       ? `background-image:url('${l.background}');background-size:cover;background-position:center;`
       : `background-image:url('assets/style-grid.png');background-size:300% 200%;background-position:${l.thumb};`;
-    const unlocked = l.ready;
+    const unlocked = l.ready && (i === 0 || cleared.includes(i - 1));
     const tag = !l.ready ? '<span class="tag soon">製作中</span>' : cleared.includes(i) ? '<span class="tag done">已過關</span>' : !unlocked ? '<span class="tag soon">未解鎖</span>' : '';
     return `<button class="level" data-level="${i}" type="button"${unlocked ? '' : ' disabled'}>
       <span class="thumb" style="${image}">${tag}</span>
@@ -1835,7 +1852,7 @@ $('levelCards').addEventListener('click', e => {
 $('backToBears').addEventListener('click', showMenu);
 $('toLevels').addEventListener('click', showLevels);
 $('nextLevel').addEventListener('click', () => { LEVEL = LEVELS[LEVELS.indexOf(LEVEL) + 1]; startGame(G.chosen); });
-$('again').addEventListener('click', () => startGame(G.chosen));
+$('again').addEventListener('click', () => { LEVEL = LEVELS[0]; startGame(G.chosen); });
 $('change').addEventListener('click', showMenu);
 $('mute').addEventListener('click', e => {
   const m = Sound.toggle();
